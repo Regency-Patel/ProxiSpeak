@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { io } from 'socket.io-client'
 import './App.css'
 
 const AVATAR_SIZE = 44
@@ -6,19 +7,28 @@ const AVATAR_SIZE = 44
 const MAX_SPEED = 260
 const ACCELERATION = 1800
 const FRICTION = 1600
+const SOCKET_SERVER_URL = 'http://localhost:3001'
 
 function App() {
   const officeRef = useRef(null)
   const avatarRef = useRef(null)
   const [position, setPosition] = useState({ x: 200, y: 180 })
 
-  // Position, velocity, and key tracking refs for continuous smooth movement
+  // Multiplayer state
+  const [otherUsers, setOtherUsers] = useState({})
+  const [myId, setMyId] = useState(null)
+  const [isConnected, setIsConnected] = useState(false)
+
+  // Position, velocity, socket, and key tracking refs
   const positionRef = useRef({ x: 200, y: 180 })
   const velocityRef = useRef({ vx: 0, vy: 0 })
   const keysPressed = useRef({})
   const [activeKeys, setActiveKeys] = useState({})
   const lastTimeRef = useRef(null)
   const lastCoordUpdateRef = useRef(0)
+  const lastSocketEmitRef = useRef(0)
+  const wasMovingRef = useRef(false)
+  const socketRef = useRef(null)
 
   // Center avatar initially once officeRef dimensions are available
   useEffect(() => {
@@ -32,6 +42,71 @@ function App() {
       if (avatarRef.current) {
         avatarRef.current.style.transform = `translate3d(${initialX}px, ${initialY}px, 0)`
       }
+
+      // If socket already connected, notify of measured center position
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('user:join', { x: initialX, y: initialY })
+      }
+    }
+  }, [])
+
+  // Socket.io connection lifecycle - created once on mount, prevented from re-running on render
+  useEffect(() => {
+    const socket = io(SOCKET_SERVER_URL, {
+      transports: ['websocket', 'polling']
+    })
+    socketRef.current = socket
+
+    socket.on('connect', () => {
+      setIsConnected(true)
+      // Announce initial position to server
+      socket.emit('user:join', positionRef.current)
+    })
+
+    socket.on('init', ({ myId: assignedId, users }) => {
+      setMyId(assignedId)
+      const userMap = {}
+      users.forEach((u) => {
+        if (u.id !== assignedId) {
+          userMap[u.id] = u
+        }
+      })
+      setOtherUsers(userMap)
+    })
+
+    socket.on('user:joined', (user) => {
+      setOtherUsers((prev) => ({
+        ...prev,
+        [user.id]: user
+      }))
+    })
+
+    socket.on('user:moved', (user) => {
+      setOtherUsers((prev) => {
+        if (!prev[user.id]) {
+          return { ...prev, [user.id]: user }
+        }
+        return {
+          ...prev,
+          [user.id]: { ...prev[user.id], x: user.x, y: user.y }
+        }
+      })
+    })
+
+    socket.on('user:left', (userId) => {
+      setOtherUsers((prev) => {
+        const next = { ...prev }
+        delete next[userId]
+        return next
+      })
+    })
+
+    socket.on('disconnect', () => {
+      setIsConnected(false)
+    })
+
+    return () => {
+      socket.disconnect()
     }
   }, [])
 
@@ -132,10 +207,31 @@ function App() {
           avatarRef.current.style.transform = `translate3d(${nextX.toFixed(2)}px, ${nextY.toFixed(2)}px, 0)`
         }
 
-        // Throttle React state update (~30fps) for the coordinate badge to avoid unnecessary full-tree re-renders
+        // Throttle React state update (~30fps) for coordinate badge to avoid unnecessary full-tree re-renders
         if (currentTime - lastCoordUpdateRef.current > 33) {
           lastCoordUpdateRef.current = currentTime
           setPosition({ x: nextX, y: nextY })
+        }
+
+        // Throttle socket emissions (~20 updates/second / 50ms) to prevent network congestion
+        if (currentTime - lastSocketEmitRef.current > 50) {
+          lastSocketEmitRef.current = currentTime
+          if (socketRef.current?.connected) {
+            socketRef.current.emit('user:move', {
+              x: Math.round(nextX),
+              y: Math.round(nextY)
+            })
+          }
+        }
+        wasMovingRef.current = true
+      } else if (wasMovingRef.current) {
+        // Avatar came to a complete halt: emit final accurate resting position once
+        wasMovingRef.current = false
+        if (socketRef.current?.connected) {
+          socketRef.current.emit('user:move', {
+            x: Math.round(positionRef.current.x),
+            y: Math.round(positionRef.current.y)
+          })
         }
       }
 
@@ -192,7 +288,6 @@ function App() {
   const isLeftActive = activeKeys['arrowleft'] || activeKeys['a']
   const isRightActive = activeKeys['arrowright'] || activeKeys['d']
 
-
   return (
     <div className="app-container">
       <header className="app-header">
@@ -207,18 +302,46 @@ function App() {
         <section className="office-card">
           <div className="card-header">
             <div className="office-status">
-              <span className="status-dot"></span>
+              <span className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`}></span>
               <span>Virtual Office Floor</span>
+              <span className="online-count">
+                ({1 + Object.keys(otherUsers).length} active)
+              </span>
             </div>
-            <div className="coordinates-badge">
-              Position: ({Math.round(position.x)}, {Math.round(position.y)})
+            <div className="header-badges">
+              {myId && (
+                <div className="user-id-badge" title={`Socket ID: ${myId}`}>
+                  ID: {myId.slice(0, 5)}
+                </div>
+              )}
+              <div className="coordinates-badge">
+                Position: ({Math.round(position.x)}, {Math.round(position.y)})
+              </div>
             </div>
           </div>
 
           <div className="virtual-office-area" ref={officeRef}>
             <div className="grid-overlay"></div>
 
-            {/* Avatar */}
+            {/* Other Connected Users' Avatars */}
+            {Object.values(otherUsers).map((user) => (
+              <div
+                key={user.id}
+                className="avatar remote-avatar"
+                style={{
+                  transform: `translate3d(${user.x}px, ${user.y}px, 0)`,
+                }}
+              >
+                <span className="avatar-label remote-label">
+                  User {user.id.slice(0, 4)}
+                </span>
+                <div className="avatar-circle remote-circle">
+                  <span className="avatar-icon">👤</span>
+                </div>
+              </div>
+            ))}
+
+            {/* Local Avatar */}
             <div
               className="avatar"
               ref={avatarRef}
@@ -254,12 +377,13 @@ function App() {
       </main>
 
       <footer className="app-footer">
-        <p>ProxiSpeak &bull; Keyboard Movement Enabled</p>
+        <p>ProxiSpeak &bull; Real-Time Multiplayer Enabled</p>
       </footer>
     </div>
   )
 }
 
 export default App
+
 
 
