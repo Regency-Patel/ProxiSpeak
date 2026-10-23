@@ -6,6 +6,7 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import User from './models/User.js';
 
 // Resolve directory name in ESM and load environment variables from server/.env
 const __filename = fileURLToPath(import.meta.url);
@@ -41,6 +42,60 @@ app.use(express.json());
 // In-memory store for connected users: socket.id -> { id, x, y }
 const users = new Map();
 
+// Sensible DB write throttle for position updates (e.g., 1000ms per user)
+const DB_WRITE_THROTTLE_MS = 1000;
+const lastDbWriteTime = new Map(); // socket.id -> timestamp
+const moveWriteTimeouts = new Map(); // socket.id -> timeoutId
+
+/**
+ * Persist user position coordinates [x, y] to MongoDB safely
+ */
+function persistUserPosition(userId, x, y) {
+  User.findOneAndUpdate(
+    { userId },
+    {
+      $set: {
+        location: {
+          type: 'Point',
+          coordinates: [x, y],
+        },
+        lastActive: new Date(),
+      },
+    }
+  ).catch((err) => {
+    console.error(`[Database Error] Failed to persist position update (${userId}):`, err.message);
+  });
+}
+
+/**
+ * Queue or throttle MongoDB writes during continuous movement
+ * Broadcasts remain real-time while DB writes are rate-limited with trailing execution
+ */
+function queueUserPositionUpdate(userId, x, y) {
+  const now = Date.now();
+  const lastWrite = lastDbWriteTime.get(userId) || 0;
+
+  if (now - lastWrite >= DB_WRITE_THROTTLE_MS) {
+    if (moveWriteTimeouts.has(userId)) {
+      clearTimeout(moveWriteTimeouts.get(userId));
+      moveWriteTimeouts.delete(userId);
+    }
+    lastDbWriteTime.set(userId, now);
+    persistUserPosition(userId, x, y);
+  } else if (!moveWriteTimeouts.has(userId)) {
+    const remainingTime = DB_WRITE_THROTTLE_MS - (now - lastWrite);
+    const timeoutId = setTimeout(() => {
+      moveWriteTimeouts.delete(userId);
+      lastDbWriteTime.set(userId, Date.now());
+      const currentUser = users.get(userId);
+      if (currentUser) {
+        persistUserPosition(userId, currentUser.x, currentUser.y);
+      }
+    }, remainingTime);
+    moveWriteTimeouts.set(userId, timeoutId);
+  }
+}
+
 // Health check / welcome route
 app.get('/', (req, res) => {
   res.json({
@@ -51,6 +106,20 @@ app.get('/', (req, res) => {
     activeUsers: users.size,
     timestamp: new Date().toISOString()
   });
+});
+
+// Endpoint to inspect persisted users in MongoDB
+app.get('/api/users', async (req, res) => {
+  try {
+    const persistedUsers = await User.find({}).sort({ updatedAt: -1 }).limit(50);
+    res.json({
+      success: true,
+      count: persistedUsers.length,
+      users: persistedUsers,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // Create HTTP server and bind Socket.io
@@ -85,6 +154,25 @@ io.on('connection', (socket) => {
 
     // Broadcast new user to other connected clients
     socket.broadcast.emit('user:joined', user);
+
+    // MongoDB Persistence: Upsert user document with initial [x, y] position
+    User.findOneAndUpdate(
+      { userId: socket.id },
+      {
+        $set: {
+          userId: socket.id,
+          location: {
+            type: 'Point',
+            coordinates: [user.x, user.y],
+          },
+          isActive: true,
+          lastActive: new Date(),
+        },
+      },
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+    ).catch((err) => {
+      console.error(`[Database Error] Failed to persist user join (${socket.id}):`, err.message);
+    });
   });
 
   // Client broadcasts position update
@@ -93,18 +181,51 @@ io.on('connection', (socket) => {
       const user = { id: socket.id, x: data.x, y: data.y };
       users.set(socket.id, user);
 
-      // Broadcast position to all other connected clients
+      // Broadcast position to all other connected clients immediately (zero delay)
       socket.broadcast.emit('user:moved', user);
+
+      // Persist position to MongoDB with throttling
+      queueUserPositionUpdate(socket.id, user.x, user.y);
     }
   });
 
   // Handle client disconnection
   socket.on('disconnect', (reason) => {
     console.log(`[Socket.io] Client disconnected: ${socket.id} (Reason: ${reason})`);
+    
+    let lastKnownPos = null;
     if (users.has(socket.id)) {
+      const u = users.get(socket.id);
+      lastKnownPos = [u.x, u.y];
       users.delete(socket.id);
       socket.broadcast.emit('user:left', socket.id);
     }
+
+    // Clear any pending throttled move timer
+    if (moveWriteTimeouts.has(socket.id)) {
+      clearTimeout(moveWriteTimeouts.get(socket.id));
+      moveWriteTimeouts.delete(socket.id);
+    }
+    lastDbWriteTime.delete(socket.id);
+
+    // MongoDB Persistence: Mark user inactive and record lastActive & final position
+    const updateFields = {
+      isActive: false,
+      lastActive: new Date(),
+    };
+    if (lastKnownPos) {
+      updateFields.location = {
+        type: 'Point',
+        coordinates: lastKnownPos,
+      };
+    }
+
+    User.findOneAndUpdate(
+      { userId: socket.id },
+      { $set: updateFields }
+    ).catch((err) => {
+      console.error(`[Database Error] Failed to mark user inactive (${socket.id}):`, err.message);
+    });
   });
 });
 
