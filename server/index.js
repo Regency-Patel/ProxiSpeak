@@ -47,6 +47,14 @@ const DB_WRITE_THROTTLE_MS = 1000;
 const lastDbWriteTime = new Map(); // socket.id -> timestamp
 const moveWriteTimeouts = new Map(); // socket.id -> timeoutId
 
+// Proximity-based voice chat: track which user pairs are in range
+const PROXIMITY_RADIUS = 150; // pixels in virtual office coordinates
+const proximityPairs = new Set(); // stores "smallerId::largerId" pair keys
+
+function getProximityKey(id1, id2) {
+  return id1 < id2 ? `${id1}::${id2}` : `${id2}::${id1}`;
+}
+
 /**
  * Persist user position coordinates [x, y] to MongoDB safely
  */
@@ -93,6 +101,49 @@ function queueUserPositionUpdate(userId, x, y) {
       }
     }, remainingTime);
     moveWriteTimeouts.set(userId, timeoutId);
+  }
+}
+
+/**
+ * Check proximity between the moved user and all other users.
+ * Emits proximity:peer-nearby when entering range, proximity:peer-left when leaving.
+ * The lower socket ID is designated as the WebRTC offer initiator.
+ */
+function checkProximity(movedUserId) {
+  const movedUser = users.get(movedUserId);
+  if (!movedUser) return;
+
+  for (const [otherId, otherUser] of users) {
+    if (otherId === movedUserId) continue;
+
+    const dx = movedUser.x - otherUser.x;
+    const dy = movedUser.y - otherUser.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    const pairKey = getProximityKey(movedUserId, otherId);
+
+    if (distance <= PROXIMITY_RADIUS) {
+      if (!proximityPairs.has(pairKey)) {
+        proximityPairs.add(pairKey);
+        // Lower socket ID initiates the WebRTC offer to prevent duplicate connections
+        const initiatorId = movedUserId < otherId ? movedUserId : otherId;
+        io.to(movedUserId).emit('proximity:peer-nearby', {
+          peerId: otherId,
+          shouldInitiate: movedUserId === initiatorId,
+        });
+        io.to(otherId).emit('proximity:peer-nearby', {
+          peerId: movedUserId,
+          shouldInitiate: otherId === initiatorId,
+        });
+        console.log(`[Proximity] Entered range: ${movedUserId.slice(0, 5)} <-> ${otherId.slice(0, 5)} (${distance.toFixed(0)}px)`);
+      }
+    } else {
+      if (proximityPairs.has(pairKey)) {
+        proximityPairs.delete(pairKey);
+        io.to(movedUserId).emit('proximity:peer-left', { peerId: otherId });
+        io.to(otherId).emit('proximity:peer-left', { peerId: movedUserId });
+        console.log(`[Proximity] Left range: ${movedUserId.slice(0, 5)} <-> ${otherId.slice(0, 5)} (${distance.toFixed(0)}px)`);
+      }
+    }
   }
 }
 
@@ -319,7 +370,23 @@ io.on('connection', (socket) => {
 
       // Persist position to MongoDB with throttling
       queueUserPositionUpdate(socket.id, user.x, user.y);
+
+      // Check proximity for voice chat connections
+      checkProximity(socket.id);
     }
+  });
+
+  // WebRTC signaling relay — forward offers, answers, and ICE candidates between peers
+  socket.on('webrtc:offer', ({ to, offer }) => {
+    io.to(to).emit('webrtc:offer', { from: socket.id, offer });
+  });
+
+  socket.on('webrtc:answer', ({ to, answer }) => {
+    io.to(to).emit('webrtc:answer', { from: socket.id, answer });
+  });
+
+  socket.on('webrtc:ice-candidate', ({ to, candidate }) => {
+    io.to(to).emit('webrtc:ice-candidate', { from: socket.id, candidate });
   });
 
   // Handle client disconnection
@@ -340,6 +407,16 @@ io.on('connection', (socket) => {
       moveWriteTimeouts.delete(socket.id);
     }
     lastDbWriteTime.delete(socket.id);
+
+    // Clean up proximity pairs and notify remaining peers
+    for (const pairKey of [...proximityPairs]) {
+      if (pairKey.includes(socket.id)) {
+        proximityPairs.delete(pairKey);
+        const [id1, id2] = pairKey.split('::');
+        const otherId = id1 === socket.id ? id2 : id1;
+        io.to(otherId).emit('proximity:peer-left', { peerId: socket.id });
+      }
+    }
 
     // MongoDB Persistence: Mark user inactive and record lastActive & final position
     const updateFields = {

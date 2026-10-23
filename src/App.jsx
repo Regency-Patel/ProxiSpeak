@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { io } from 'socket.io-client'
+import useProximityVoice from './hooks/useProximityVoice'
+import VoiceIndicator from './components/VoiceIndicator'
 import './App.css'
 
 const AVATAR_SIZE = 44
@@ -8,6 +10,7 @@ const MAX_SPEED = 260
 const ACCELERATION = 1800
 const FRICTION = 1600
 const SOCKET_SERVER_URL = 'http://localhost:3001'
+const PROXIMITY_RADIUS = 150 // must match server PROXIMITY_RADIUS
 
 function App() {
   const officeRef = useRef(null)
@@ -18,6 +21,7 @@ function App() {
   const [otherUsers, setOtherUsers] = useState({})
   const [myId, setMyId] = useState(null)
   const [isConnected, setIsConnected] = useState(false)
+  const [socket, setSocket] = useState(null)
 
   // Position, velocity, socket, and key tracking refs
   const positionRef = useRef({ x: 200, y: 180 })
@@ -56,6 +60,7 @@ function App() {
       transports: ['websocket', 'polling']
     })
     socketRef.current = socket
+    setSocket(socket)
 
     socket.on('connect', () => {
       setIsConnected(true)
@@ -109,6 +114,10 @@ function App() {
       socket.disconnect()
     }
   }, [])
+
+  // Proximity-based voice chat
+  const { isMicEnabled, activePeers, nearbyPeerIds, micError, toggleMic } =
+    useProximityVoice(socket, myId)
 
   // Smooth, delta-time game loop with velocity interpolation and boundary clamping
   useEffect(() => {
@@ -324,24 +333,29 @@ function App() {
             <div className="grid-overlay"></div>
 
             {/* Other Connected Users' Avatars */}
-            {Object.values(otherUsers).map((user) => (
+            {Object.values(otherUsers).map((user) => {
+              const isVoiceConnected = activePeers[user.id]?.connected
+              const isNearby = nearbyPeerIds.has(user.id)
+              return (
               <div
                 key={user.id}
-                className="avatar remote-avatar"
+                className={`avatar remote-avatar${isVoiceConnected ? ' voice-connected' : ''}${isNearby ? ' nearby' : ''}`}
                 style={{
                   transform: `translate3d(${user.x}px, ${user.y}px, 0)`,
                 }}
               >
                 <span className="avatar-label remote-label">
+                  {isVoiceConnected && <span className="voice-icon">🔊 </span>}
                   User {user.id.slice(0, 4)}
                 </span>
                 <div className="avatar-circle remote-circle">
                   <span className="avatar-icon">👤</span>
                 </div>
               </div>
-            ))}
+              )
+            })}
 
-            {/* Local Avatar */}
+            {/* Local Avatar with proximity range circle */}
             <div
               className="avatar"
               ref={avatarRef}
@@ -349,7 +363,20 @@ function App() {
                 transform: `translate3d(${position.x}px, ${position.y}px, 0)`,
               }}
             >
-              <span className="avatar-label">You</span>
+              {/* Proximity range visualization */}
+              <div
+                className={`proximity-ring${Object.keys(activePeers).length > 0 ? ' has-peers' : ''}`}
+                style={{
+                  width: PROXIMITY_RADIUS * 2,
+                  height: PROXIMITY_RADIUS * 2,
+                  top: -(PROXIMITY_RADIUS - AVATAR_SIZE / 2),
+                  left: -(PROXIMITY_RADIUS - AVATAR_SIZE / 2),
+                }}
+              />
+              <span className="avatar-label">
+                {isMicEnabled && <span className="voice-icon">🎙️ </span>}
+                You
+              </span>
               <div className="avatar-circle">
                 <span className="avatar-icon">🧑‍💻</span>
                 <span className="pulse-ring"></span>
@@ -377,8 +404,16 @@ function App() {
       </main>
 
       <footer className="app-footer">
-        <p>ProxiSpeak &bull; Real-Time Multiplayer Enabled</p>
+        <p>ProxiSpeak &bull; Real-Time Multiplayer &amp; Voice Chat Enabled</p>
       </footer>
+
+      {/* Floating voice indicator panel */}
+      <VoiceIndicator
+        isMicEnabled={isMicEnabled}
+        activePeers={activePeers}
+        micError={micError}
+        toggleMic={toggleMic}
+      />
     </div>
   )
 }

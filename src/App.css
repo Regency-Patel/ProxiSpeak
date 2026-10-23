@@ -312,4 +312,206 @@
   font-size: 0.85rem;
 }
 
+/* ─── Proximity Range Ring ────────────────────────────────────────── */
+.proximity-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1.5px dashed rgba(37, 99, 235, 0.2);
+  background: radial-gradient(circle, rgba(37, 99, 235, 0.03) 0%, transparent 70%);
+  pointer-events: none;
+  transition: border-color 0.4s ease, background 0.4s ease;
+  z-index: 0;
+}
 
+.proximity-ring.has-peers {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: radial-gradient(circle, rgba(34, 197, 94, 0.06) 0%, transparent 70%);
+  animation: proximity-pulse 2.5s ease-in-out infinite;
+}
+
+@keyframes proximity-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+/* ─── Voice-connected avatar highlights ───────────────────────────── */
+.avatar.voice-connected .avatar-circle.remote-circle {
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.4), 0 0 12px rgba(34, 197, 94, 0.2);
+}
+
+.avatar.nearby .avatar-circle.remote-circle {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+}
+
+.voice-icon {
+  font-size: 0.7rem;
+}
+
+/* ─── Floating Voice Indicator Panel ──────────────────────────────── */
+.voice-indicator {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 16px;
+  color: #e2e8f0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.85rem;
+  z-index: 1000;
+  min-width: 200px;
+  max-width: 280px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  transition: all 0.25s ease;
+}
+
+.voice-indicator.expanded {
+  border-radius: 16px;
+}
+
+.voice-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mic-toggle {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.mic-toggle.mic-on {
+  background: rgba(34, 197, 94, 0.2);
+  color: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.3);
+}
+
+.mic-toggle.mic-on:hover {
+  background: rgba(34, 197, 94, 0.3);
+}
+
+.mic-toggle.mic-off {
+  background: rgba(239, 68, 68, 0.15);
+  color: #94a3b8;
+}
+
+.mic-toggle.mic-off:hover {
+  background: rgba(239, 68, 68, 0.25);
+  color: #ef4444;
+}
+
+.voice-status {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voice-label {
+  font-weight: 500;
+  font-size: 0.82rem;
+}
+
+.peer-count-badge {
+  background: #2563eb;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 9999px;
+  min-width: 16px;
+  text-align: center;
+}
+
+.expand-arrow {
+  font-size: 0.6rem;
+  opacity: 0.5;
+  transition: transform 0.2s;
+}
+
+/* ─── Voice details (expanded) ────────────────────────────────────── */
+.voice-details {
+  padding: 0 14px 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.voice-error {
+  color: #fbbf24;
+  font-size: 0.78rem;
+  padding: 8px 0 4px;
+}
+
+.voice-hint {
+  color: #94a3b8;
+  font-size: 0.78rem;
+  padding: 10px 0 4px;
+  text-align: center;
+}
+
+.peer-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.peer-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.8rem;
+}
+
+.peer-item + .peer-item {
+  border-top: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.peer-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-connected {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
+}
+
+.dot-connecting {
+  background: #fbbf24;
+  animation: dot-blink 1s ease-in-out infinite;
+}
+
+@keyframes dot-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.peer-id {
+  flex: 1;
+  font-weight: 500;
+}
+
+.peer-status-label {
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.peer-item.connected .peer-status-label {
+  color: #22c55e;
+}
