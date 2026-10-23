@@ -108,6 +108,139 @@ app.get('/', (req, res) => {
   });
 });
 
+// Geospatial nearby user discovery endpoint using $near / $geoNear and 2dsphere index
+app.get('/api/users/nearby', async (req, res) => {
+  try {
+    const { x, y, radius, userId } = req.query;
+
+    // Validate presence of coordinates
+    if (x === undefined || y === undefined || x === '' || y === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required query parameters: x and y coordinates are required',
+      });
+    }
+
+    const parsedX = parseFloat(x);
+    const parsedY = parseFloat(y);
+
+    // Validate coordinates are numeric
+    if (Number.isNaN(parsedX) || Number.isNaN(parsedY)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid coordinates: x and y must be valid numeric values',
+      });
+    }
+
+    // Validate coordinates within valid GeoJSON Point bounds for 2dsphere index [-180, 180] and [-90, 90]
+    if (parsedX < -180 || parsedX > 180 || parsedY < -90 || parsedY > 90) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid coordinates: x (longitude) must be between -180 and 180, and y (latitude) must be between -90 and 90',
+      });
+    }
+
+    // Validate radius (default: 100 meters)
+    let parsedRadius = 100;
+    if (radius !== undefined && radius !== '') {
+      parsedRadius = parseFloat(radius);
+      if (Number.isNaN(parsedRadius) || parsedRadius < 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid radius: radius must be a non-negative number',
+        });
+      }
+    }
+
+    const requestingUserId = userId ? String(userId).trim() : null;
+
+    // Filter to return only active users and exclude the requesting user if userId is provided
+    const filterQuery = {
+      isActive: true,
+      ...(requestingUserId ? { userId: { $ne: requestingUserId } } : {}),
+    };
+
+    let nearbyUsers;
+    try {
+      // Primary: MongoDB $geoNear aggregation (performs geospatial near query and outputs distance in meters)
+      nearbyUsers = await User.aggregate([
+        {
+          $geoNear: {
+            near: {
+              type: 'Point',
+              coordinates: [parsedX, parsedY],
+            },
+            distanceField: 'distance',
+            maxDistance: parsedRadius,
+            spherical: true,
+            query: filterQuery,
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            id: '$userId',
+            userId: 1,
+            username: 1,
+            coordinates: '$location.coordinates',
+            distance: { $round: ['$distance', 2] },
+          },
+        },
+      ]);
+    } catch (aggErr) {
+      // Fallback: Using $near with User.find and calculating spherical distance in meters
+      const foundUsers = await User.find({
+        location: {
+          $near: {
+            $geometry: {
+              type: 'Point',
+              coordinates: [parsedX, parsedY],
+            },
+            $maxDistance: parsedRadius,
+          },
+        },
+        ...filterQuery,
+      }).lean();
+
+      nearbyUsers = foundUsers.map((u) => {
+        const [uLng, uLat] = u.location.coordinates;
+        const dLat = ((uLat - parsedY) * Math.PI) / 180;
+        const dLng = ((uLng - parsedX) * Math.PI) / 180;
+        const a =
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos((parsedY * Math.PI) / 180) *
+            Math.cos((uLat * Math.PI) / 180) *
+            Math.sin(dLng / 2) *
+            Math.sin(dLng / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        const distance = Math.round(6371000 * c * 100) / 100;
+
+        return {
+          id: u.userId,
+          userId: u.userId,
+          username: u.username || '',
+          coordinates: u.location.coordinates,
+          distance,
+        };
+      });
+    }
+
+    res.json({
+      success: true,
+      count: nearbyUsers.length,
+      radius: parsedRadius,
+      users: nearbyUsers,
+    });
+  } catch (error) {
+    console.error('[API Error] Failed to discover nearby users:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve nearby users',
+      message: error.message,
+    });
+  }
+});
+
 // Endpoint to inspect persisted users in MongoDB
 app.get('/api/users', async (req, res) => {
   try {
