@@ -2,9 +2,19 @@ import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// Resolve directory name in ESM and load environment variables from server/.env
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const MONGODB_URI = process.env.MONGODB_URI;
 
 // Allowed frontend origins (Vite default: 5173, plus fallback ports / localhost regex)
 const allowedOrigins = [
@@ -37,6 +47,7 @@ app.get('/', (req, res) => {
     status: 'ok',
     message: 'ProxiSpeak Backend Server is running',
     port: PORT,
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     activeUsers: users.size,
     timestamp: new Date().toISOString()
   });
@@ -97,11 +108,44 @@ io.on('connection', (socket) => {
   });
 });
 
-// Start HTTP server on port 3001
-server.listen(PORT, () => {
-  console.log(`=========================================`);
-  console.log(` ProxiSpeak Backend running on port ${PORT}`);
-  console.log(` HTTP URL: http://localhost:${PORT}`);
-  console.log(` CORS allowed origins: ${allowedOrigins.join(', ')} (and local ports)`);
-  console.log(`=========================================`);
+// MongoDB connection event listeners for runtime monitoring
+mongoose.connection.on('error', (err) => {
+  console.error(`[Database Error] MongoDB runtime error: ${err.message}`);
 });
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('[Database Warning] MongoDB disconnected.');
+});
+
+// Start Express and Socket.io server only after MongoDB connects successfully
+async function startServer() {
+  if (!MONGODB_URI) {
+    console.error('\n❌ [MongoDB Error] MONGODB_URI is not defined in server/.env');
+    console.error('👉 Please copy server/.env.example to server/.env and configure your MongoDB connection string.');
+    console.error('   Example: MONGODB_URI=mongodb://localhost:27017/proxispeak\n');
+    process.exit(1);
+  }
+
+  try {
+    console.log('[Database] Connecting to MongoDB...');
+    await mongoose.connect(MONGODB_URI);
+    console.log('[Database] Connected to MongoDB successfully.');
+
+    server.listen(PORT, () => {
+      console.log(`=========================================`);
+      console.log(` ProxiSpeak Backend running on port ${PORT}`);
+      console.log(` HTTP URL: http://localhost:${PORT}`);
+      console.log(` Database: Connected`);
+      console.log(` CORS allowed origins: ${allowedOrigins.join(', ')} (and local ports)`);
+      console.log(`=========================================`);
+    });
+  } catch (error) {
+    console.error('\n❌ [Database Error] Failed to connect to MongoDB:');
+    console.error(`   ${error.message}\n`);
+    console.error('👉 Ensure MongoDB is running and your connection string in server/.env is valid.\n');
+    process.exit(1);
+  }
+}
+
+startServer();
+
