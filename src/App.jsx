@@ -407,6 +407,17 @@ function App() {
         <p>ProxiSpeak &bull; Real-Time Multiplayer &amp; Voice Chat Enabled</p>
       </footer>
 
+      {/* Floating nearby users panel */}
+      <div className="nearby-users-panel">
+        <div className="nearby-users-header">
+          <span className="nearby-users-icon">👥</span>
+          <h3>Nearby Users</h3>
+        </div>
+        <div className="nearby-users-body">
+          <p className="nearby-users-placeholder">Nearby users will appear here.</p>
+        </div>
+      </div>
+
       {/* Floating voice indicator panel */}
       <VoiceIndicator
         isMicEnabled={isMicEnabled}
