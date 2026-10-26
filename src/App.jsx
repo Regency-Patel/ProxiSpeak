@@ -119,6 +119,62 @@ function App() {
   const { isMicEnabled, activePeers, nearbyPeerIds, micError, toggleMic } =
     useProximityVoice(socket, myId)
 
+  // Nearby users discovery state
+  const [nearbyUsers, setNearbyUsers] = useState([])
+  const [isNearbyLoading, setIsNearbyLoading] = useState(true)
+  const [nearbyError, setNearbyError] = useState(null)
+
+  // Fetch nearby users from backend API
+  useEffect(() => {
+    let isMounted = true
+    const controller = new AbortController()
+
+    const fetchNearby = async () => {
+      try {
+        const params = new URLSearchParams({
+          x: Math.round(position.x),
+          y: Math.round(position.y),
+          radius: PROXIMITY_RADIUS,
+        })
+        if (myId) {
+          params.append('userId', myId)
+        }
+
+        const res = await fetch(`${SOCKET_SERVER_URL}/api/users/nearby?${params.toString()}`, {
+          signal: controller.signal,
+        })
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`)
+        }
+        const data = await res.json()
+        if (isMounted && data.success) {
+          setNearbyUsers(data.users || [])
+          setNearbyError(null)
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError' && isMounted) {
+          setNearbyError('Failed to load nearby users')
+        }
+      } finally {
+        if (isMounted) {
+          setIsNearbyLoading(false)
+        }
+      }
+    }
+
+    // Debounce to prevent flooding backend during continuous movement
+    const debounceTimer = setTimeout(fetchNearby, 300)
+    // Periodic refresh every 4 seconds in case other users move or join
+    const pollInterval = setInterval(fetchNearby, 4000)
+
+    return () => {
+      isMounted = false
+      controller.abort()
+      clearTimeout(debounceTimer)
+      clearInterval(pollInterval)
+    }
+  }, [position.x, position.y, myId, otherUsers])
+
   // Smooth, delta-time game loop with velocity interpolation and boundary clamping
   useEffect(() => {
     let animationFrameId
@@ -412,9 +468,30 @@ function App() {
         <div className="nearby-users-header">
           <span className="nearby-users-icon">👥</span>
           <h3>Nearby Users</h3>
+          {nearbyUsers.length > 0 && (
+            <span className="nearby-users-badge">{nearbyUsers.length}</span>
+          )}
         </div>
         <div className="nearby-users-body">
-          <p className="nearby-users-placeholder">Nearby users will appear here.</p>
+          {nearbyError ? (
+            <p className="nearby-users-error">{nearbyError}</p>
+          ) : isNearbyLoading && nearbyUsers.length === 0 ? (
+            <p className="nearby-users-placeholder">Scanning for nearby users…</p>
+          ) : nearbyUsers.length === 0 ? (
+            <p className="nearby-users-placeholder">No nearby users</p>
+          ) : (
+            <ul className="nearby-users-list">
+              {nearbyUsers.map((user) => (
+                <li key={user.userId} className="nearby-user-item">
+                  <span className="nearby-user-dot" />
+                  <span className="nearby-user-name">
+                    {user.username?.trim() || `User ${user.userId.slice(0, 5)}`}
+                  </span>
+                  <span className="nearby-user-distance">{user.distance}px</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </div>
 
