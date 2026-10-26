@@ -49,8 +49,8 @@ const userSchema = new mongoose.Schema(
   }
 );
 
-// 2dsphere index for geospatial proximity queries ($near, $geoWithin, etc.)
-userSchema.index({ location: '2dsphere' });
+// 2d index on coordinates for planar 2D virtual office coordinates (pixel space)
+userSchema.index({ 'location.coordinates': '2d' }, { min: -10000, max: 10000 });
 
 const User = mongoose.model('User', userSchema);
 
