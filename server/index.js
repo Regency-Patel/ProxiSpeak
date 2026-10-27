@@ -317,6 +317,9 @@ io.on('connection', (socket) => {
     // Broadcast new user to other connected clients
     socket.broadcast.emit('user:joined', user);
 
+    // Check proximity for voice chat connections on initial join
+    checkProximity(socket.id);
+
     // MongoDB Persistence: Upsert user document with initial [x, y] position
     User.findOneAndUpdate(
       { userId: socket.id },
