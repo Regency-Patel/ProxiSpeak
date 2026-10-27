@@ -84,7 +84,10 @@ export default function useProximityVoice(socket, myId) {
 
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       peerConnectionsRef.current[peerId] = pc;
-      pendingCandidatesRef.current[peerId] = [];
+      // Initialise the pending‑candidate queue only if it doesn't already exist.
+      if (!pendingCandidatesRef.current[peerId]) {
+        pendingCandidatesRef.current[peerId] = [];
+      }
 
       // Attach local audio tracks to the connection
       if (localStreamRef.current) {
