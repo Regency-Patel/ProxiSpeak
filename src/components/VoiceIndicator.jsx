@@ -8,7 +8,7 @@ export default function VoiceIndicator({ isMicEnabled, activePeers, micError, to
   const [isExpanded, setIsExpanded] = useState(false);
 
   const peerEntries = Object.entries(activePeers);
-  const connectedCount = peerEntries.filter(([, p]) => p.connected).length;
+  const connectedCount = peerEntries.filter(([, p]) => p.status === 'connected').length;
 
   return (
     <div className={`voice-indicator ${isExpanded ? 'expanded' : ''}`}>
@@ -63,14 +63,14 @@ export default function VoiceIndicator({ isMicEnabled, activePeers, micError, to
               {peerEntries.map(([peerId, info]) => (
                 <li
                   key={peerId}
-                  className={`peer-item ${info.connected ? 'connected' : 'connecting'}`}
+                  className={`peer-item ${info.status === 'connected' ? 'connected' : info.status === 'failed' ? 'failed' : 'connecting'}`}
                 >
                   <span
-                    className={`peer-dot ${info.connected ? 'dot-connected' : 'dot-connecting'}`}
+                    className={`peer-dot ${info.status === 'connected' ? 'dot-connected' : info.status === 'failed' ? 'dot-failed' : 'dot-connecting'}`}
                   />
                   <span className="peer-id">User {peerId.slice(0, 5)}</span>
                   <span className="peer-status-label">
-                    {info.connected ? 'Connected' : 'Connecting…'}
+                    {info.status === 'connected' ? 'Connected' : info.status === 'failed' ? 'Failed' : 'Connecting…'}
                   </span>
                 </li>
               ))}

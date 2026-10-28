@@ -16,7 +16,7 @@ const ICE_SERVERS = [
  */
 export default function useProximityVoice(socket, myId) {
   const [isMicEnabled, setIsMicEnabled] = useState(false);
-  const [activePeers, setActivePeers] = useState({}); // peerId -> { connected: bool }
+  const [activePeers, setActivePeers] = useState({}); // peerId -> { status: 'connecting' | 'connected' | 'failed' }
   const [nearbyPeerIds, setNearbyPeerIds] = useState(new Set());
   const [micError, setMicError] = useState(null);
 
@@ -120,7 +120,7 @@ export default function useProximityVoice(socket, myId) {
 
           setActivePeers((prev) => ({
             ...prev,
-            [peerId]: { connected: true },
+            [peerId]: { status: 'connected' },
           }));
         }
       };
@@ -128,11 +128,11 @@ export default function useProximityVoice(socket, myId) {
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
         if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-          setActivePeers((prev) => {
-            const next = { ...prev };
-            delete next[peerId];
-            return next;
-          });
+          // Mark as failed instead of removing entry
+          setActivePeers((prev) => ({
+            ...prev,
+            [peerId]: { status: 'failed' },
+          }));
         }
       };
 
@@ -188,7 +188,7 @@ export default function useProximityVoice(socket, myId) {
 
           setActivePeers((prev) => ({
             ...prev,
-            [peerId]: { connected: false },
+            [peerId]: { status: 'connecting' },
           }));
         } catch (err) {
           console.error('[WebRTC] Failed to create offer:', err);
@@ -197,7 +197,7 @@ export default function useProximityVoice(socket, myId) {
         // Mark as pending — will connect when the offer arrives
         setActivePeers((prev) => ({
           ...prev,
-          [peerId]: { connected: false },
+          [peerId]: { status: 'connecting' },
         }));
       }
     };

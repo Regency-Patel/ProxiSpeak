@@ -390,7 +390,7 @@ function App() {
 
             {/* Other Connected Users' Avatars */}
             {Object.values(otherUsers).map((user) => {
-              const isVoiceConnected = activePeers[user.id]?.connected
+              const isVoiceConnected = activePeers[user.id]?.status === 'connected'
               const isNearby = nearbyPeerIds.has(user.id)
               return (
               <div
