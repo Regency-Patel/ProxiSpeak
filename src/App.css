@@ -497,6 +497,12 @@
   animation: dot-blink 1s ease-in-out infinite;
 }
 
+.dot-failed {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239,68,68,0.5);
+}
+
+
 @keyframes dot-blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -513,6 +519,14 @@
 }
 
 .peer-item.connected .peer-status-label {
+  color: #22c55e;
+}
+
+/* Failed connection styling */
+.peer-item.failed .peer-status-label {
+  color: #ef4444; /* red */
+}
+
   color: #22c55e;
 }
 
