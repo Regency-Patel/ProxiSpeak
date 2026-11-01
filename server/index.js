@@ -6,6 +6,7 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
 import User from './models/User.js';
 
 // Resolve directory name in ESM and load environment variables from server/.env
@@ -49,7 +50,7 @@ const moveWriteTimeouts = new Map(); // socket.id -> timeoutId
 
 // Proximity-based voice chat: track which user pairs are in range
 const PROXIMITY_RADIUS = 150; // pixels in virtual office coordinates
-const proximityPairs = new Set(); // stores "smallerId::largerId" pair keys
+const proximityPairs = new Map(); // pair key -> generation ID
 
 function getProximityKey(id1, id2) {
   return id1 < id2 ? `${id1}::${id2}` : `${id2}::${id1}`;
@@ -123,24 +124,28 @@ function checkProximity(movedUserId) {
 
     if (distance <= PROXIMITY_RADIUS) {
       if (!proximityPairs.has(pairKey)) {
-        proximityPairs.add(pairKey);
+        const generation = randomUUID();
+        proximityPairs.set(pairKey, generation);
         // Lower socket ID initiates the WebRTC offer to prevent duplicate connections
         const initiatorId = movedUserId < otherId ? movedUserId : otherId;
         io.to(movedUserId).emit('proximity:peer-nearby', {
           peerId: otherId,
           shouldInitiate: movedUserId === initiatorId,
+          generation,
         });
         io.to(otherId).emit('proximity:peer-nearby', {
           peerId: movedUserId,
           shouldInitiate: otherId === initiatorId,
+          generation,
         });
         console.log(`[Proximity] Entered range: ${movedUserId.slice(0, 5)} <-> ${otherId.slice(0, 5)} (${distance.toFixed(0)}px)`);
       }
     } else {
       if (proximityPairs.has(pairKey)) {
+        const generation = proximityPairs.get(pairKey);
         proximityPairs.delete(pairKey);
-        io.to(movedUserId).emit('proximity:peer-left', { peerId: otherId });
-        io.to(otherId).emit('proximity:peer-left', { peerId: movedUserId });
+        io.to(movedUserId).emit('proximity:peer-left', { peerId: otherId, generation });
+        io.to(otherId).emit('proximity:peer-left', { peerId: movedUserId, generation });
         console.log(`[Proximity] Left range: ${movedUserId.slice(0, 5)} <-> ${otherId.slice(0, 5)} (${distance.toFixed(0)}px)`);
       }
     }
@@ -358,16 +363,19 @@ io.on('connection', (socket) => {
   });
 
   // WebRTC signaling relay — forward offers, answers, and ICE candidates between peers
-  socket.on('webrtc:offer', ({ to, offer }) => {
-    io.to(to).emit('webrtc:offer', { from: socket.id, offer });
+  socket.on('webrtc:offer', ({ to, offer, generation }) => {
+    if (proximityPairs.get(getProximityKey(socket.id, to)) !== generation) return;
+    io.to(to).emit('webrtc:offer', { from: socket.id, offer, generation });
   });
 
-  socket.on('webrtc:answer', ({ to, answer }) => {
-    io.to(to).emit('webrtc:answer', { from: socket.id, answer });
+  socket.on('webrtc:answer', ({ to, answer, generation }) => {
+    if (proximityPairs.get(getProximityKey(socket.id, to)) !== generation) return;
+    io.to(to).emit('webrtc:answer', { from: socket.id, answer, generation });
   });
 
-  socket.on('webrtc:ice-candidate', ({ to, candidate }) => {
-    io.to(to).emit('webrtc:ice-candidate', { from: socket.id, candidate });
+  socket.on('webrtc:ice-candidate', ({ to, candidate, generation }) => {
+    if (proximityPairs.get(getProximityKey(socket.id, to)) !== generation) return;
+    io.to(to).emit('webrtc:ice-candidate', { from: socket.id, candidate, generation });
   });
 
   // Handle client disconnection
@@ -390,12 +398,16 @@ io.on('connection', (socket) => {
     lastDbWriteTime.delete(socket.id);
 
     // Clean up proximity pairs and notify remaining peers
-    for (const pairKey of [...proximityPairs]) {
+    for (const pairKey of [...proximityPairs.keys()]) {
       if (pairKey.includes(socket.id)) {
+        const generation = proximityPairs.get(pairKey);
         proximityPairs.delete(pairKey);
         const [id1, id2] = pairKey.split('::');
         const otherId = id1 === socket.id ? id2 : id1;
-        io.to(otherId).emit('proximity:peer-left', { peerId: socket.id });
+        io.to(otherId).emit('proximity:peer-left', {
+          peerId: socket.id,
+          generation,
+        });
       }
     }
 
@@ -460,4 +472,3 @@ async function startServer() {
 }
 
 startServer();
-
