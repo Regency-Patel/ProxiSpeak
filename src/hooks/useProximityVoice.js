@@ -31,7 +31,7 @@ export default function useProximityVoice(
   const peerConnectionsRef = useRef({}); // peerId -> RTCPeerConnection
   const pendingCandidatesRef = useRef({}); // peerId -> ICECandidate[]
   const audioContextRef = useRef(null);
-  const remoteAudioNodesRef = useRef({}); // peerId -> { stream, source, gain, targetGain }
+  const remoteAudioNodesRef = useRef({}); // peerId -> { stream, source, gain, panner, targetGain, targetPan }
 
   const getAudioContext = useCallback(() => {
     if (!audioContextRef.current) {
@@ -67,6 +67,7 @@ export default function useProximityVoice(
 
     audioNodes.source.disconnect();
     audioNodes.gain.disconnect();
+    audioNodes.panner.disconnect();
     delete remoteAudioNodesRef.current[peerId];
   }, []);
 
@@ -80,22 +81,29 @@ export default function useProximityVoice(
 
     let source;
     let gain;
+    let panner;
     try {
       source = audioContext.createMediaStreamSource(stream);
       gain = audioContext.createGain();
+      panner = audioContext.createStereoPanner();
       gain.gain.setValueAtTime(0, audioContext.currentTime);
+      panner.pan.setValueAtTime(0, audioContext.currentTime);
       source.connect(gain);
-      gain.connect(audioContext.destination);
+      gain.connect(panner);
+      panner.connect(audioContext.destination);
 
       remoteAudioNodesRef.current[peerId] = {
         stream,
         source,
         gain,
+        panner,
         targetGain: 0,
+        targetPan: 0,
       };
     } catch (err) {
       source?.disconnect();
       gain?.disconnect();
+      panner?.disconnect();
       console.error(`[Voice] Failed to create remote audio path for ${peerId}:`, err.message);
     }
   }, [closePeerAudio, getAudioContext]);
@@ -400,6 +408,7 @@ export default function useProximityVoice(
         Object.entries(remoteAudioNodesRef.current).forEach(([peerId, audioNodes]) => {
           const remotePosition = remoteUsersRef?.current?.[peerId];
           let targetGain = 0;
+          let targetPan = 0;
 
           if (
             localPosition &&
@@ -415,12 +424,25 @@ export default function useProximityVoice(
             const distance = Math.sqrt(dx * dx + dy * dy);
             const normalizedDistance = Math.min(distance / proximityRadius, 1);
             targetGain = 0.5 * (1 + Math.cos(Math.PI * normalizedDistance));
+            const horizontalOffset = remotePosition.x - localPosition.x;
+            targetPan = Math.max(
+              -1,
+              Math.min(horizontalOffset / proximityRadius, 1)
+            );
           }
 
           if (Math.abs(targetGain - audioNodes.targetGain) > 0.001) {
             audioNodes.targetGain = targetGain;
             audioNodes.gain.gain.setTargetAtTime(
               targetGain,
+              audioContext.currentTime,
+              0.08
+            );
+          }
+          if (Math.abs(targetPan - audioNodes.targetPan) > 0.001) {
+            audioNodes.targetPan = targetPan;
+            audioNodes.panner.pan.setTargetAtTime(
+              targetPan,
               audioContext.currentTime,
               0.08
             );
