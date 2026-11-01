@@ -14,7 +14,14 @@ const ICE_SERVERS = [
  * @param {string | null} myId - Local user's socket ID
  * @returns {{ isMicEnabled, activePeers, micError, toggleMic, nearbyPeerIds }}
  */
-export default function useProximityVoice(socket, myId) {
+export default function useProximityVoice(
+  socket,
+  myId,
+  localPositionRef,
+  remoteUsersRef,
+  avatarSize,
+  proximityRadius
+) {
   const [isMicEnabled, setIsMicEnabled] = useState(false);
   const [activePeers, setActivePeers] = useState({}); // peerId -> { status: 'connecting' | 'connected' | 'failed' }
   const [nearbyPeerIds, setNearbyPeerIds] = useState(new Set());
@@ -23,7 +30,75 @@ export default function useProximityVoice(socket, myId) {
   const localStreamRef = useRef(null);
   const peerConnectionsRef = useRef({}); // peerId -> RTCPeerConnection
   const pendingCandidatesRef = useRef({}); // peerId -> ICECandidate[]
-  const audioElementsRef = useRef({}); // peerId -> HTMLAudioElement
+  const audioContextRef = useRef(null);
+  const remoteAudioNodesRef = useRef({}); // peerId -> { stream, source, gain, targetGain }
+
+  const getAudioContext = useCallback(() => {
+    if (!audioContextRef.current) {
+      const AudioContextConstructor = window.AudioContext;
+      if (!AudioContextConstructor) {
+        console.error('[Voice] Web Audio API is not available in this browser.');
+        return null;
+      }
+      try {
+        audioContextRef.current = new AudioContextConstructor();
+      } catch (err) {
+        console.error('[Voice] Failed to create AudioContext:', err.message);
+        return null;
+      }
+    }
+    return audioContextRef.current;
+  }, []);
+
+  const resumeAudioContext = useCallback(async () => {
+    const audioContext = getAudioContext();
+    if (audioContext?.state === 'suspended') {
+      try {
+        await audioContext.resume();
+      } catch (err) {
+        console.error('[Voice] Failed to resume AudioContext:', err.message);
+      }
+    }
+  }, [getAudioContext]);
+
+  const closePeerAudio = useCallback((peerId) => {
+    const audioNodes = remoteAudioNodesRef.current[peerId];
+    if (!audioNodes) return;
+
+    audioNodes.source.disconnect();
+    audioNodes.gain.disconnect();
+    delete remoteAudioNodesRef.current[peerId];
+  }, []);
+
+  const createPeerAudio = useCallback((peerId, stream) => {
+    const existing = remoteAudioNodesRef.current[peerId];
+    if (existing?.stream === stream) return;
+    if (existing) closePeerAudio(peerId);
+
+    const audioContext = getAudioContext();
+    if (!audioContext) return;
+
+    let source;
+    let gain;
+    try {
+      source = audioContext.createMediaStreamSource(stream);
+      gain = audioContext.createGain();
+      gain.gain.setValueAtTime(0, audioContext.currentTime);
+      source.connect(gain);
+      gain.connect(audioContext.destination);
+
+      remoteAudioNodesRef.current[peerId] = {
+        stream,
+        source,
+        gain,
+        targetGain: 0,
+      };
+    } catch (err) {
+      source?.disconnect();
+      gain?.disconnect();
+      console.error(`[Voice] Failed to create remote audio path for ${peerId}:`, err.message);
+    }
+  }, [closePeerAudio, getAudioContext]);
 
   // ─── Microphone control ─────────────────────────────────────────────
   const acquireMic = useCallback(async () => {
@@ -53,6 +128,7 @@ export default function useProximityVoice(socket, myId) {
   }, []);
 
   const toggleMic = useCallback(async () => {
+    void resumeAudioContext();
     if (isMicEnabled) {
       // Mute: disable tracks but keep connections alive
       if (localStreamRef.current) {
@@ -72,14 +148,19 @@ export default function useProximityVoice(socket, myId) {
         await acquireMic();
       }
     }
-  }, [isMicEnabled, acquireMic]);
+  }, [isMicEnabled, acquireMic, resumeAudioContext]);
 
   // ─── Peer connection lifecycle ──────────────────────────────────────
   const createPeerConnection = useCallback(
     (peerId) => {
-      // Close existing connection to the same peer if any
+      // Close and clean up any existing connection to the same peer (but keep UI entry)
       if (peerConnectionsRef.current[peerId]) {
-        peerConnectionsRef.current[peerId].close();
+        // Dispose of resources without deleting the activePeers entry
+        const oldPc = peerConnectionsRef.current[peerId];
+        delete peerConnectionsRef.current[peerId];
+        oldPc.close();
+        closePeerAudio(peerId);
+        delete pendingCandidatesRef.current[peerId];
       }
 
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -106,18 +187,13 @@ export default function useProximityVoice(socket, myId) {
         }
       };
 
-      // Play remote audio when track arrives
+      // Route only the remote stream through its peer-specific gain node.
       pc.ontrack = (event) => {
+        // Ensure this event belongs to the current active connection for this peer
+        if (peerConnectionsRef.current[peerId] !== pc) return;
         const remoteStream = event.streams[0];
         if (remoteStream) {
-          let audioEl = audioElementsRef.current[peerId];
-          if (!audioEl) {
-            audioEl = new Audio();
-            audioEl.autoplay = true;
-            audioElementsRef.current[peerId] = audioEl;
-          }
-          audioEl.srcObject = remoteStream;
-
+          createPeerAudio(peerId, remoteStream);
           setActivePeers((prev) => ({
             ...prev,
             [peerId]: { status: 'connected' },
@@ -126,42 +202,45 @@ export default function useProximityVoice(socket, myId) {
       };
 
       pc.onconnectionstatechange = () => {
+        // Ensure this event belongs to the current active connection for this peer
+        if (peerConnectionsRef.current[peerId] !== pc) return;
         const state = pc.connectionState;
-        if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-          // Mark as failed instead of removing entry
+        if (state === 'failed' || state === 'closed') {
+          // Mark as failed and clean up resources, but keep the UI entry
           setActivePeers((prev) => ({
             ...prev,
             [peerId]: { status: 'failed' },
           }));
+          closePeerAudio(peerId);
+          delete pendingCandidatesRef.current[peerId];
+          // Remove stale pc reference if it matches this instance
+          if (peerConnectionsRef.current[peerId] === pc) {
+            delete peerConnectionsRef.current[peerId];
+          }
         }
+        // "disconnected" is left as‑is – we keep the connection alive to allow recovery.
       };
 
       return pc;
     },
-    [socket]
+    [socket, closePeerAudio, createPeerAudio]
   );
 
   const closePeerConnection = useCallback((peerId) => {
     const pc = peerConnectionsRef.current[peerId];
     if (pc) {
-      pc.close();
       delete peerConnectionsRef.current[peerId];
+      pc.close();
     }
     delete pendingCandidatesRef.current[peerId];
-
-    const audioEl = audioElementsRef.current[peerId];
-    if (audioEl) {
-      audioEl.pause();
-      audioEl.srcObject = null;
-      delete audioElementsRef.current[peerId];
-    }
+    closePeerAudio(peerId);
 
     setActivePeers((prev) => {
       const next = { ...prev };
       delete next[peerId];
       return next;
     });
-  }, []);
+  }, [closePeerAudio]);
 
   // ─── Socket event handlers ─────────────────────────────────────────
   useEffect(() => {
@@ -289,9 +368,72 @@ export default function useProximityVoice(socket, myId) {
 
       // Tear down every active peer connection
       Object.keys(peerConnectionsRef.current).forEach(closePeerConnection);
+      Object.keys(remoteAudioNodesRef.current).forEach(closePeerAudio);
+      if (audioContextRef.current) {
+        const audioContext = audioContextRef.current;
+        audioContextRef.current = null;
+        if (audioContext.state !== 'closed') {
+          void audioContext.close().catch((err) => {
+            console.error('[Voice] Failed to close AudioContext:', err.message);
+          });
+        }
+      }
       releaseMic();
     };
-  }, [socket, acquireMic, releaseMic, createPeerConnection, closePeerConnection]);
+  }, [
+    socket,
+    acquireMic,
+    releaseMic,
+    createPeerConnection,
+    closePeerConnection,
+    closePeerAudio,
+  ]);
+
+  useEffect(() => {
+    let animationFrameId;
+
+    const updatePeerVolumes = () => {
+      const audioContext = audioContextRef.current;
+      if (audioContext && audioContext.state !== 'closed') {
+        const localPosition = localPositionRef?.current;
+
+        Object.entries(remoteAudioNodesRef.current).forEach(([peerId, audioNodes]) => {
+          const remotePosition = remoteUsersRef?.current?.[peerId];
+          let targetGain = 0;
+
+          if (
+            localPosition &&
+            remotePosition &&
+            Number.isFinite(localPosition.x) &&
+            Number.isFinite(localPosition.y) &&
+            Number.isFinite(remotePosition.x) &&
+            Number.isFinite(remotePosition.y)
+          ) {
+            const centerOffset = avatarSize / 2;
+            const dx = (localPosition.x + centerOffset) - (remotePosition.x + centerOffset);
+            const dy = (localPosition.y + centerOffset) - (remotePosition.y + centerOffset);
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            const normalizedDistance = Math.min(distance / proximityRadius, 1);
+            targetGain = 0.5 * (1 + Math.cos(Math.PI * normalizedDistance));
+          }
+
+          if (Math.abs(targetGain - audioNodes.targetGain) > 0.001) {
+            audioNodes.targetGain = targetGain;
+            audioNodes.gain.gain.setTargetAtTime(
+              targetGain,
+              audioContext.currentTime,
+              0.08
+            );
+          }
+        });
+      }
+
+      animationFrameId = requestAnimationFrame(updatePeerVolumes);
+    };
+
+    animationFrameId = requestAnimationFrame(updatePeerVolumes);
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [localPositionRef, remoteUsersRef, avatarSize, proximityRadius]);
 
   return {
     isMicEnabled,

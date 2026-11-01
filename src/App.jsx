@@ -19,6 +19,7 @@ function App() {
 
   // Multiplayer state
   const [otherUsers, setOtherUsers] = useState({})
+  const otherUsersRef = useRef({})
   const [myId, setMyId] = useState(null)
   const [isConnected, setIsConnected] = useState(false)
   const [socket, setSocket] = useState(null)
@@ -76,34 +77,33 @@ function App() {
           userMap[u.id] = u
         }
       })
+      otherUsersRef.current = userMap
       setOtherUsers(userMap)
     })
 
     socket.on('user:joined', (user) => {
-      setOtherUsers((prev) => ({
-        ...prev,
-        [user.id]: user
-      }))
+      const next = { ...otherUsersRef.current, [user.id]: user }
+      otherUsersRef.current = next
+      setOtherUsers(next)
     })
 
     socket.on('user:moved', (user) => {
-      setOtherUsers((prev) => {
-        if (!prev[user.id]) {
-          return { ...prev, [user.id]: user }
-        }
-        return {
-          ...prev,
-          [user.id]: { ...prev[user.id], x: user.x, y: user.y }
-        }
-      })
+      const previous = otherUsersRef.current
+      const next = {
+        ...previous,
+        [user.id]: previous[user.id]
+          ? { ...previous[user.id], x: user.x, y: user.y }
+          : user
+      }
+      otherUsersRef.current = next
+      setOtherUsers(next)
     })
 
     socket.on('user:left', (userId) => {
-      setOtherUsers((prev) => {
-        const next = { ...prev }
-        delete next[userId]
-        return next
-      })
+      const next = { ...otherUsersRef.current }
+      delete next[userId]
+      otherUsersRef.current = next
+      setOtherUsers(next)
     })
 
     socket.on('disconnect', () => {
@@ -117,7 +117,14 @@ function App() {
 
   // Proximity-based voice chat
   const { isMicEnabled, activePeers, nearbyPeerIds, micError, toggleMic } =
-    useProximityVoice(socket, myId)
+    useProximityVoice(
+      socket,
+      myId,
+      positionRef,
+      otherUsersRef,
+      AVATAR_SIZE,
+      PROXIMITY_RADIUS
+    )
 
   // Nearby users discovery state
   const [nearbyUsers, setNearbyUsers] = useState([])
@@ -507,6 +514,5 @@ function App() {
 }
 
 export default App
-
 
 
