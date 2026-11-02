@@ -51,6 +51,7 @@ const moveWriteTimeouts = new Map(); // socket.id -> timeoutId
 // Proximity-based voice chat: track which user pairs are in range
 const PROXIMITY_RADIUS = 150; // pixels in virtual office coordinates
 const proximityPairs = new Map(); // pair key -> generation ID
+const restartNegotiations = new Map(); // pair key -> restart negotiation ID
 
 function getProximityKey(id1, id2) {
   return id1 < id2 ? `${id1}::${id2}` : `${id2}::${id1}`;
@@ -373,9 +374,34 @@ io.on('connection', (socket) => {
     io.to(to).emit('webrtc:answer', { from: socket.id, answer, generation });
   });
 
-  socket.on('webrtc:ice-candidate', ({ to, candidate, generation }) => {
-    if (proximityPairs.get(getProximityKey(socket.id, to)) !== generation) return;
-    io.to(to).emit('webrtc:ice-candidate', { from: socket.id, candidate, generation });
+  socket.on('webrtc:ice-candidate', ({ to, candidate, generation, restartId }) => {
+    const pairKey = getProximityKey(socket.id, to);
+    const currentGeneration = proximityPairs.get(pairKey);
+    if (currentGeneration !== generation) return;
+    if (typeof restartId === 'string' && restartNegotiations.get(pairKey) !== restartId) return;
+    io.to(to).emit('webrtc:ice-candidate', { from: socket.id, candidate, generation, restartId });
+  });
+
+  socket.on('webrtc:restart-request', ({ to, generation, restartId }) => {
+    const pairKey = getProximityKey(socket.id, to);
+    if (proximityPairs.get(pairKey) !== generation) return;
+    if (typeof restartId !== 'string' || restartNegotiations.get(pairKey) === restartId) return;
+    restartNegotiations.set(pairKey, restartId);
+    io.to(to).emit('webrtc:restart-request', { from: socket.id, generation, restartId });
+  });
+
+  socket.on('webrtc:restart-offer', ({ to, offer, generation, restartId }) => {
+    const pairKey = getProximityKey(socket.id, to);
+    if (proximityPairs.get(pairKey) !== generation) return;
+    if (typeof restartId !== 'string' || restartNegotiations.get(pairKey) !== restartId) return;
+    io.to(to).emit('webrtc:restart-offer', { from: socket.id, offer, generation, restartId });
+  });
+
+  socket.on('webrtc:restart-answer', ({ to, answer, generation, restartId }) => {
+    const pairKey = getProximityKey(socket.id, to);
+    if (proximityPairs.get(pairKey) !== generation) return;
+    if (typeof restartId !== 'string' || restartNegotiations.get(pairKey) !== restartId) return;
+    io.to(to).emit('webrtc:restart-answer', { from: socket.id, answer, generation, restartId });
   });
 
   // Handle client disconnection
@@ -402,6 +428,7 @@ io.on('connection', (socket) => {
       if (pairKey.includes(socket.id)) {
         const generation = proximityPairs.get(pairKey);
         proximityPairs.delete(pairKey);
+        restartNegotiations.delete(pairKey);
         const [id1, id2] = pairKey.split('::');
         const otherId = id1 === socket.id ? id2 : id1;
         io.to(otherId).emit('proximity:peer-left', {

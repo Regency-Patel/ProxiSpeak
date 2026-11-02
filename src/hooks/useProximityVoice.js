@@ -5,6 +5,11 @@ const ICE_SERVERS = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 
+const ICE_DISCONNECTED_GRACE_MS = 1500;
+const ICE_RESTART_BASE_DELAY_MS = 1000;
+const ICE_RESTART_MAX_ATTEMPTS = 3;
+const ICE_RESTART_MAX_DELAY_MS = 8000;
+
 /**
  * Custom React hook for proximity-based WebRTC voice chat.
  * Manages peer connections, microphone access, and audio playback
@@ -35,8 +40,16 @@ export default function useProximityVoice(
   const peerConnectionGenerationsRef = useRef({}); // peerId -> generation owned by current RTCPeerConnection
   const failedPeerGenerationsRef = useRef({}); // peerId -> generation that failed
   const pendingCandidatesRef = useRef({}); // peerId -> ICECandidate[]
+  const peerRecoveryRef = useRef({}); // peerId -> { generation, restartId, retryCount, timerId }
   const audioContextRef = useRef(null);
   const remoteAudioNodesRef = useRef({}); // peerId -> { stream, source, gain, panner, targetGain, targetPan }
+
+  const randomRestartId = useCallback(() => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `restart-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }, []);
 
   const getAudioContext = useCallback(() => {
     if (!audioContextRef.current) {
@@ -244,10 +257,12 @@ export default function useProximityVoice(
       // Forward ICE candidates to the remote peer via Socket.io
       pc.onicecandidate = (event) => {
         if (event.candidate && socket) {
+          const currentRecovery = peerRecoveryRef.current[peerId];
           socket.emit('webrtc:ice-candidate', {
             to: peerId,
             candidate: event.candidate,
             generation,
+            restartId: currentRecovery?.restartId || null,
           });
         }
       };
@@ -271,7 +286,7 @@ export default function useProximityVoice(
         if (!isCurrentPeerGeneration(peerId, generation, pc)) return;
         const state = pc.connectionState;
         if (state === 'failed' || state === 'closed') {
-          // Mark as failed and clean up resources, but keep the UI entry
+          clearPeerRecovery(peerId);
           setActivePeers((prev) => ({
             ...prev,
             [peerId]: { status: 'failed' },
@@ -282,8 +297,11 @@ export default function useProximityVoice(
           delete peerConnectionsRef.current[peerId];
           delete peerConnectionGenerationsRef.current[peerId];
           disposePeerConnection(pc);
+          return;
         }
-        // "disconnected" is left as‑is – we keep the connection alive to allow recovery.
+        if (state === 'disconnected') {
+          maybeStartRecovery(peerId, generation, pc);
+        }
       };
 
       return pc;
@@ -294,10 +312,25 @@ export default function useProximityVoice(
       createPeerAudio,
       disposePeerConnection,
       isCurrentPeerGeneration,
+      clearPeerRecovery,
+      maybeStartRecovery,
     ]
   );
 
+  const clearPeerRecovery = useCallback((peerId) => {
+    const recovery = peerRecoveryRef.current[peerId];
+    if (recovery?.timerId) {
+      clearTimeout(recovery.timerId);
+    }
+    if (recovery?.restartTimerId) {
+      clearTimeout(recovery.restartTimerId);
+    }
+    delete peerRecoveryRef.current[peerId];
+  }, []);
+
   const closePeerConnection = useCallback((peerId) => {
+    clearPeerRecovery(peerId);
+
     const pc = peerConnectionsRef.current[peerId];
     if (pc) {
       delete peerConnectionsRef.current[peerId];
@@ -312,7 +345,89 @@ export default function useProximityVoice(
       delete next[peerId];
       return next;
     });
-  }, [closePeerAudio, disposePeerConnection]);
+  }, [clearPeerRecovery, closePeerAudio, disposePeerConnection]);
+
+  const scheduleRestartOffer = useCallback(async (peerId, generation, restartId) => {
+    const pc = peerConnectionsRef.current[peerId];
+    if (!pc || !isCurrentPeerGeneration(peerId, generation, pc)) return;
+
+    try {
+      const offer = await pc.createOffer({ iceRestart: true });
+      if (!isCurrentPeerGeneration(peerId, generation, pc)) return;
+      await pc.setLocalDescription(offer);
+      if (!isCurrentPeerGeneration(peerId, generation, pc)) return;
+      peerRecoveryRef.current[peerId] = {
+        ...(peerRecoveryRef.current[peerId] || {}),
+        generation,
+        restartId,
+        retryCount: Math.max(peerRecoveryRef.current[peerId]?.retryCount || 0, 1),
+      };
+      socket.emit('webrtc:restart-offer', { to: peerId, offer, generation, restartId });
+    } catch (err) {
+      console.error('[WebRTC] Failed to create restart offer:', err);
+    }
+  }, [isCurrentPeerGeneration, socket]);
+
+  const maybeStartRecovery = useCallback((peerId, generation, pc) => {
+    if (!pc || !peerGenerationsRef.current[peerId] || peerGenerationsRef.current[peerId] !== generation) return;
+    if (pc.connectionState !== 'disconnected') return;
+
+    const existing = peerRecoveryRef.current[peerId];
+    if (existing?.timerId) return;
+
+    const restartId = randomRestartId();
+    const graceTimerId = setTimeout(() => {
+      const currentPc = peerConnectionsRef.current[peerId];
+      const currentGeneration = peerGenerationsRef.current[peerId];
+      const activeRecovery = peerRecoveryRef.current[peerId];
+      if (!currentPc || !currentGeneration || currentGeneration !== generation || !activeRecovery || activeRecovery.restartId !== restartId) return;
+      if (currentPc.connectionState === 'connected' || currentPc.connectionState === 'connecting') {
+        clearPeerRecovery(peerId);
+        return;
+      }
+
+      const nextAttempt = (activeRecovery.retryCount || 0) + 1;
+      if (nextAttempt > ICE_RESTART_MAX_ATTEMPTS) {
+        setActivePeers((prev) => ({ ...prev, [peerId]: { status: 'failed' } }));
+        closePeerConnection(peerId);
+        return;
+      }
+
+      const delay = Math.min(ICE_RESTART_BASE_DELAY_MS * (2 ** Math.max(nextAttempt - 1, 0)), ICE_RESTART_MAX_DELAY_MS);
+      const nextRestartId = randomRestartId();
+      peerRecoveryRef.current[peerId] = {
+        generation,
+        restartId: nextRestartId,
+        retryCount: nextAttempt,
+        timerId: null,
+        restartTimerId: null,
+      };
+
+      if (socket && String(myId ?? '') < String(peerId)) {
+        const restartTimerId = setTimeout(() => {
+          const current = peerConnectionsRef.current[peerId];
+          if (current && current.connectionState !== 'connected' && current.connectionState !== 'connecting' && typeof current.restartIce === 'function') {
+            current.restartIce();
+          }
+        }, delay);
+        peerRecoveryRef.current[peerId].restartTimerId = restartTimerId;
+        void scheduleRestartOffer(peerId, generation, nextRestartId);
+        return;
+      }
+
+      if (socket) {
+        socket.emit('webrtc:restart-request', { to: peerId, generation, restartId: nextRestartId });
+      }
+    }, ICE_DISCONNECTED_GRACE_MS);
+
+    peerRecoveryRef.current[peerId] = {
+      generation,
+      restartId,
+      retryCount: 0,
+      timerId: graceTimerId,
+      restartTimerId: null,
+    };
+  }, [clearPeerRecovery, closePeerConnection, myId, randomRestartId, scheduleRestartOffer, socket]);
 
   // ─── Socket event handlers ─────────────────────────────────────────
   useEffect(() => {
